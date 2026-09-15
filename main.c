@@ -42,6 +42,12 @@ typedef struct {
     char *current_file;
 } Document;
 
+typedef struct HistoryNode {
+    Document doc;
+    struct HistoryNode *prev;
+    struct HistoryNode *next;
+} HistoryNode;
+
 static void trim_newline(char *text);
 static char *duplicate_string(const char *text);
 static char *skip_spaces(char *text);
@@ -59,10 +65,15 @@ static bool load_file(Document *doc, const char *path);
 static bool save_file(const Document *doc, const char *path);
 static void print_usage(void);
 static void print_help(void);
-static bool execute_command(Document *doc, char *input);
+static bool execute_command(HistoryNode **history, Document *doc, char *input);
+
+static void copy_document(Document *dest, const Document *src);
+static void push_history(HistoryNode **current, const Document *doc);
+static void free_history(HistoryNode *current);
 
 int main(int argc, char **argv) {
     Document doc = {NULL, NULL, 0, NULL};
+    HistoryNode *history = NULL;
 
     if (argc > 2) {
         print_usage();
@@ -76,6 +87,8 @@ int main(int argc, char **argv) {
             return EXIT_FAILURE;
         }
     }
+
+    push_history(&history, &doc);
 
     printf("Command-Line Line Editor\n");
     printf("Type 'help' to see available commands.\n");
@@ -94,11 +107,12 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        if (!execute_command(&doc, input)) {
+        if (!execute_command(&history, &doc, input)) {
             break;
         }
     }
 
+    free_history(history);
     free_document(&doc);
     return EXIT_SUCCESS;
 }
@@ -561,6 +575,8 @@ static void print_help(void) {
     printf("  find <text>\n");
     printf("  replace <old_text> <new_text>\n");
     printf("  stats\n");
+    printf("  undo\n");
+    printf("  redo\n");
     printf("  quit\n");
     printf("\nNotes:\n");
     printf("  - Line numbers are 1-based.\n");
@@ -569,7 +585,7 @@ static void print_help(void) {
     printf("  - replace updates every matching occurrence in the whole document.\n");
 }
 
-static bool execute_command(Document *doc, char *input) {
+static bool execute_command(HistoryNode **history, Document *doc, char *input) {
     char *command;
     char *rest;
     char *index_text;
@@ -624,6 +640,8 @@ static bool execute_command(Document *doc, char *input) {
         }
         if (!load_file(doc, rest)) {
             fprintf(stderr, "Error: failed to load '%s'.\n", rest);
+        } else {
+            push_history(history, doc);
         }
         return true;
     }
@@ -683,6 +701,7 @@ static bool execute_command(Document *doc, char *input) {
         if (!replace_all_in_document(doc, rest, new_value)) {
             printf("No replacements made.\n");
         } else {
+            push_history(history, doc);
             printf("Replacement complete.\n");
         }
         return true;
@@ -715,6 +734,7 @@ static bool execute_command(Document *doc, char *input) {
         if (!delete_line_at(doc, index)) {
             printf("Error: cannot delete line %zu. Index out of range.\n", index);
         } else {
+            push_history(history, doc);
             printf("Deleted line %zu.\n", index);
         }
         return true;
@@ -755,7 +775,32 @@ static bool execute_command(Document *doc, char *input) {
         if (!insert_line_at(doc, index, text)) {
             printf("Error: cannot insert at line %zu. Index out of range.\n", index);
         } else {
+            push_history(history, doc);
             printf("Inserted at line %zu.\n", index);
+        }
+        return true;
+    }
+
+    if (strcmp(command, "undo") == 0) {
+        if (*history == NULL || (*history)->prev == NULL) {
+            printf("Nothing to undo.\n");
+        } else {
+            *history = (*history)->prev;
+            free_document(doc);
+            copy_document(doc, &(*history)->doc);
+            printf("Undo complete.\n");
+        }
+        return true;
+    }
+
+    if (strcmp(command, "redo") == 0) {
+        if (*history == NULL || (*history)->next == NULL) {
+            printf("Nothing to redo.\n");
+        } else {
+            *history = (*history)->next;
+            free_document(doc);
+            copy_document(doc, &(*history)->doc);
+            printf("Redo complete.\n");
         }
         return true;
     }
@@ -763,4 +808,66 @@ static bool execute_command(Document *doc, char *input) {
     printf("Unknown command: %s\n", command);
     printf("Type 'help' for command usage.\n");
     return true;
+}
+
+static void copy_document(Document *dest, const Document *src) {
+    dest->head = NULL;
+    dest->tail = NULL;
+    dest->count = 0;
+    dest->current_file = duplicate_string(src->current_file);
+
+    LineNode *current = src->head;
+    while (current != NULL) {
+        append_line(dest, current->text);
+        current = current->next;
+    }
+}
+
+static void free_history(HistoryNode *current) {
+    if (current == NULL) {
+        return;
+    }
+
+    while (current->prev != NULL) {
+        current = current->prev;
+    }
+
+    while (current != NULL) {
+        HistoryNode *next = current->next;
+        free_document(&current->doc);
+        free(current);
+        current = next;
+    }
+}
+
+static void push_history(HistoryNode **current, const Document *doc) {
+    if (current == NULL) {
+        return;
+    }
+
+    if (*current != NULL && (*current)->next != NULL) {
+        HistoryNode *fwd = (*current)->next;
+        while (fwd != NULL) {
+            HistoryNode *next = fwd->next;
+            free_document(&fwd->doc);
+            free(fwd);
+            fwd = next;
+        }
+        (*current)->next = NULL;
+    }
+
+    HistoryNode *new_node = malloc(sizeof(*new_node));
+    if (new_node == NULL) {
+        fprintf(stderr, "Error: out of memory for history.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    copy_document(&new_node->doc, doc);
+    new_node->prev = *current;
+    new_node->next = NULL;
+
+    if (*current != NULL) {
+        (*current)->next = new_node;
+    }
+    *current = new_node;
 }
